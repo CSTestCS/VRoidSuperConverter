@@ -9,7 +9,7 @@
     "build": "node scripts/build.mjs --minify",
     "start": "npm run build && electron .",
     "test": "node --test \"test/**/*.test.mjs\"",
-    "dist:win": "npm run build && electron-builder --win portable nsis --x64",
+    "dist:win": "npm run build && electron-builder --win portable nsis --x64 --publish never",
     "dist": "npm run build && electron-builder",
     "smoke": "node scripts/build.mjs && node scripts/make-fixtures.mjs .smoke/fixtures && node scripts/smoke.mjs .smoke/fixtures .smoke/shots"
   },
