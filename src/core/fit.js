@@ -75,7 +75,7 @@ const _bary = new THREE.Vector3();
 /** Closest point on body with interpolated normal, skin weights and region. */
 export function queryBody(field, p, maxDistance = Infinity) {
   const hit = field.bvh.closestPointToPoint(p, {}, 0, maxDistance);
-  if (!hit) return null;
+  if (!hit || hit.distance > maxDistance) return null;
   const idx = field.geo.index;
   const pos = field.geo.attributes.position, nor = field.geo.attributes.normal;
   const a = idx.getX(hit.faceIndex * 3), b = idx.getX(hit.faceIndex * 3 + 1), c = idx.getX(hit.faceIndex * 3 + 2);
