@@ -1,0 +1,57 @@
+{
+  "name": "vroid-super-converter",
+  "productName": "VRoid Super Converter",
+  "version": "0.1.0",
+  "description": "Convert any bipedal model or animation to the VRoid skeleton, with a 3D preview, fitting, pose export, lip sync, IK, rig conversion and Project DIVA .farc merging.",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "test": "node --test test/",
+    "dist:win": "npm run build && electron-builder --win portable nsis",
+    "dist": "npm run build && electron-builder"
+  },
+  "license": "MIT",
+  "build": {
+    "appId": "com.vroidsuperconverter.app",
+    "productName": "VRoid Super Converter",
+    "files": [
+      "electron/**",
+      "dist/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.12"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "fflate": "^0.8.3",
+    "three": "^0.180.0"
+  }
+}
