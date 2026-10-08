@@ -6,13 +6,13 @@
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs --minify",
     "start": "npm run build && electron .",
-    "test": "node --test test/",
-    "dist:win": "npm run build && electron-builder --win portable nsis",
-    "dist": "npm run build && electron-builder"
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "dist:win": "npm run build && electron-builder --win portable nsis --x64",
+    "dist": "npm run build && electron-builder",
+    "smoke": "node scripts/build.mjs && node scripts/make-fixtures.mjs .smoke/fixtures && node scripts/smoke.mjs .smoke/fixtures .smoke/shots"
   },
-  "license": "MIT",
   "build": {
     "appId": "com.vroidsuperconverter.app",
     "productName": "VRoid Super Converter",
@@ -29,7 +29,8 @@
         "portable",
         "nsis"
       ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "signAndEditExecutable": false
     },
     "portable": {
       "artifactName": "${productName}-${version}-portable.exe"
@@ -42,18 +43,18 @@
       "target": [
         "AppImage"
       ]
-    }
+    },
+    "asar": true
   },
   "devDependencies": {
-    "electron": "^38.8.6",
-    "electron-builder": "^26.15.3",
-    "esbuild": "^0.25.12"
-  },
-  "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
     "@pixiv/three-vrm-animation": "^3.5.5",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.12",
     "fflate": "^0.8.3",
     "three": "^0.180.0",
     "three-mesh-bvh": "^0.9.16"
-  }
+  },
+  "private": true
 }
