@@ -1,30 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { autoRig, estimateJoints, gatherSurfacePoints } from '../src/core/autoRig.js';
 import { worldPos } from '../src/core/retarget.js';
-
-export function boxPerson() {
-  const parts = [
-    [0.3, 0.5, 0.18, 0, 1.1, 0], // torso
-    [0.12, 0.08, 0.1, 0, 1.39, 0], // neck
-    [0.22, 0.24, 0.22, 0, 1.55, 0], // head
-    [0.62, 0.08, 0.08, 0.46, 1.27, 0], // left arm (T-pose)
-    [0.62, 0.08, 0.08, -0.46, 1.27, 0],
-    [0.12, 0.84, 0.12, 0.08, 0.44, 0], // left leg
-    [0.12, 0.84, 0.12, -0.08, 0.44, 0],
-    [0.1, 0.05, 0.22, 0.08, 0.025, 0.05], // feet
-    [0.1, 0.05, 0.22, -0.08, 0.025, 0.05],
-    [0.3, 0.12, 0.18, 0, 0.9, 0], // pelvis
-  ];
-  const geos = parts.map(([w, h, d, x, y, z]) => new THREE.BoxGeometry(w, h, d, Math.max(1, Math.round(w / 0.04)), Math.max(1, Math.round(h / 0.04)), 2).translate(x, y, z));
-  const geo = mergeGeometries(geos.map((g) => g.toNonIndexed()).map((g) => { g.deleteAttribute('uv'); return g; }));
-  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial());
-  const g = new THREE.Group();
-  g.add(mesh);
-  return g;
-}
+import { boxPerson } from './helpers.mjs';
 
 test('estimates joints on an unrigged T-pose mesh', () => {
   const g = boxPerson();
