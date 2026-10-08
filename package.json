@@ -51,6 +51,7 @@
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
+    "@pixiv/three-vrm-animation": "^3.5.5",
     "fflate": "^0.8.3",
     "three": "^0.180.0",
     "three-mesh-bvh": "^0.9.16"
