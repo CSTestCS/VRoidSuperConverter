@@ -108,6 +108,8 @@ await click('Generate lip sync');
 check((await logText()).includes('Lip sync:'), 'lip sync generated with vocal isolation');
 
 // --- COLLADA export, re-import
+await page.selectOption('.clip-select', '0'); // a body animation (lip sync alone has no bone tracks)
+await page.waitForTimeout(200);
 await tab('Export');
 await page.locator('select').filter({ hasText: 'COLLADA (.dae)' }).first().selectOption('dae');
 await page.locator('select').filter({ hasText: 'Active animation' }).first().selectOption('active');
