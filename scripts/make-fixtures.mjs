@@ -26,6 +26,20 @@ for (let i = 0; i < pos.count; i++) obj += `v ${pos.getX(i)} ${pos.getY(i)} ${po
 for (let i = 0; i < pos.count; i += 3) obj += `f ${i + 1} ${i + 2} ${i + 3}\n`;
 await writeFile(`${out}/box_person.obj`, obj);
 
+// 2b. hair made of separate cards around a head at ~1.45 m (for VRoid hair rebuild)
+let hair = '', vbase = 1;
+for (let k = 0; k < 12; k++) {
+  const a = (k / 12) * Math.PI * 2;
+  const cx = Math.sin(a) * 0.11, cz = Math.cos(a) * 0.11, tx = Math.cos(a) * 0.01, tz = -Math.sin(a) * 0.01;
+  for (let j = 0; j <= 6; j++) {
+    const y = 1.6 - j * 0.05, out = 1 + j * 0.04;
+    hair += `v ${cx * out - tx} ${y} ${cz * out - tz}\nv ${cx * out + tx} ${y} ${cz * out + tz}\n`;
+  }
+  for (let j = 0; j < 6; j++) { const i = vbase + j * 2; hair += `f ${i} ${i + 1} ${i + 3}\nf ${i} ${i + 3} ${i + 2}\n`; }
+  vbase += 14;
+}
+await writeFile(`${out}/hair_cards.obj`, hair);
+
 // 3. BVH animation (centimetres, raises the left arm)
 const tree = ['Hips', [0, 92, 0], [
   ['Spine', [0, 8, 0], [['Neck', [0, 33, 0], [['Head', [0, 7, 0], [], [0, 20, 0]]]],

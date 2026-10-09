@@ -30,11 +30,12 @@ export class Viewer {
     this.axes = new THREE.AxesHelper(0.3);
     this.scene.add(this.axes);
 
-    this.slots = { vroid: new THREE.Group(), other: new THREE.Group(), diva: new THREE.Group() };
+    this.slots = { vroid: new THREE.Group(), other: new THREE.Group(), diva: new THREE.Group(), hair: new THREE.Group() };
     for (const g of Object.values(this.slots)) this.scene.add(g);
     this.helpers = new THREE.Group();
     this.scene.add(this.helpers);
-    this.sideBySide = false;
+    this.viewMode = 'side'; // vroid | other | both (overlapping) | side (side by side)
+    this.onViewChange = null;
 
     this.transform = new TransformControls(this.camera, this.renderer.domElement);
     this.transform.setSize(0.6);
@@ -70,16 +71,46 @@ export class Viewer {
     for (const c of [...g.children]) g.remove(c);
     this.stop(slot);
     if (object) g.add(object);
+    if (slot === 'other') {
+      // Show centimetre/decimetre models (Mixamo, Unreal…) at metre scale next to the VRoid model.
+      g.scale.setScalar(1);
+      if (object) {
+        g.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(object);
+        const h = box.isEmpty() ? 0 : box.max.y - box.min.y;
+        if (h > 20) g.scale.setScalar(0.01); else if (h > 3.5) g.scale.setScalar(0.1);
+      }
+    }
     this.layout();
     this.refreshHelpers();
+  }
+
+  /** vroid | other | both | side */
+  setViewMode(mode) {
+    this.viewMode = mode;
+    this.layout();
+    this.refreshHelpers();
+    this.onViewChange?.(mode);
   }
 
   get(slot) { return this.slots[slot].children[0] ?? null; }
 
   /** Place the secondary slot beside the VRoid model, or overlapping it. */
   layout() {
-    this.slots.other.position.x = this.sideBySide && this.get('vroid') ? 1.1 : 0;
-    this.slots.diva.position.x = this.get('vroid') || this.get('other') ? -1.1 : 0;
+    const mode = this.viewMode;
+    const hasV = !!this.get('vroid'), hasO = !!this.get('other');
+    this.slots.vroid.visible = mode !== 'other';
+    this.slots.hair.visible = mode !== 'other';
+    this.slots.other.visible = mode !== 'vroid';
+    let offset = 0;
+    if (mode === 'side' && hasV && hasO) {
+      this.slots.other.position.x = 0;
+      this.scene.updateMatrixWorld(true);
+      const a = new THREE.Box3().setFromObject(this.slots.vroid), b = new THREE.Box3().setFromObject(this.slots.other);
+      offset = (a.isEmpty() ? 0.5 : a.max.x) - (b.isEmpty() ? -0.5 : b.min.x) + 0.25;
+    }
+    this.slots.other.position.x = offset;
+    this.slots.diva.position.x = hasV || hasO ? -1.1 : 0;
   }
 
   /** Run fn with both slots at the origin (tools work in world space). */
@@ -95,7 +126,7 @@ export class Viewer {
     if (!this.showSkeleton) return;
     for (const slot of ['vroid', 'other']) {
       const o = this.get(slot);
-      if (!o) continue;
+      if (!o || !this.slots[slot].visible) continue;
       let hasBones = false;
       o.traverse((x) => { if (x.isBone) hasBones = true; });
       if (!hasBones) continue;

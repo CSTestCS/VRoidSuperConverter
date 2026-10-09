@@ -12,8 +12,9 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 const server = http.createServer(async (req, res) => {
   try {
     const p = path.join('dist', decodeURIComponent(req.url.split('?')[0]) === '/' ? 'index.html' : decodeURIComponent(req.url.split('?')[0]));
+    const body = await readFile(p);
     res.writeHead(200, { 'content-type': types[path.extname(p)] ?? 'application/octet-stream' });
-    res.end(await readFile(p));
+    res.end(body);
   } catch { res.writeHead(404); res.end(); }
 }).listen(0);
 const url = `http://127.0.0.1:${server.address().port}/`;

@@ -2,22 +2,26 @@
 import * as THREE from 'three';
 import { Viewer } from '../viewer/Viewer.js';
 import { h, field, section, button, row, note } from './dom.js';
-import { openFiles, saveFile, readSiblings } from './platform.js';
+import { openFiles, saveFile, saveFiles, readSiblings } from './platform.js';
 import { loadModelFile, loadAudioFile, MODEL_EXTENSIONS, AUDIO_EXTENSIONS, ext } from '../formats/loaders.js';
 import { convertToVRoid, retargetClip, captureRest } from '../core/retarget.js';
 import { autoRig } from '../core/autoRig.js';
 import { detectHumanoid, validateHumanoid } from '../core/humanoid.js';
-import { HUMANOID_NAMES } from '../core/vroidSkeleton.js';
+import { HUMANOID_NAMES, HUMANOID_FROM_VROID, VROID_REST } from '../core/vroidSkeleton.js';
 import { refitClothing, attachClothing, matchProportions, DEFAULT_FIT_SETTINGS } from '../core/fit.js';
 import { editHeadMotion, DEFAULT_HEAD_OPTIONS } from '../core/headControl.js';
 import { optimizeModel, DEFAULT_OPTIMIZE } from '../core/optimize.js';
-import { renameShapeKeys, renameClipShapeKeys, addAsymmetricShapeKeys } from '../core/shapeKeys.js';
+import { renameShapeKeys, renameClipShapeKeys, addAsymmetricShapeKeys, listShapeKeys, setShapeKeyWeight } from '../core/shapeKeys.js';
 import { addIKRig, bakeIKToClip } from '../core/ik.js';
 import { RIG_PROFILES, getProfile, parseProfile } from '../core/rigProfiles.js';
 import { convertToProfile, convertToProvidedRig } from '../core/rigConvert.js';
 import { analyzeLipSync, lipSyncClip, mergeClips, DEFAULT_LIPSYNC } from '../core/lipsync.js';
 import { bakeAppearance, encodePng } from '../core/textureBake.js';
-import { exportVRoidPose, applyVRoidPose, storeRestPose } from '../formats/vroidPose.js';
+import { exportVRoidPose, applyVRoidPose, storeRestPose, stringifyVRoidPose, DEFAULT_POSE_OPTIONS } from '../formats/vroidPose.js';
+import { exportCollada } from '../formats/colladaExporter.js';
+import { decodeHair, hairPreview, extractStrands, rebuildHairItem, findAttachments, setAttachmentBone, VROID_ATTACH_BONES } from '../formats/vroidHair.js';
+import { readSkinParams } from '../diva/skinParam.js';
+import { History, snapshotState, restoreDivaFlags } from './history.js';
 import { exportFBX } from '../formats/fbxExporter.js';
 import { exportGLTF } from '../formats/gltfExport.js';
 import { readCustomItem, writeCustomItem, recategorize, replaceImage, setThumbnail, setName, regenerateIds, CATEGORIES, describeCustomItem } from '../formats/vroidCustomItem.js';
@@ -45,8 +49,10 @@ const state = {
     shapeKeys: { style: 'readable', blend: 0.02, leftSuffix: '.L', rightSuffix: '.R' },
     rig: { profile: 'tower-unite', proportions: 'model', keepExtraBones: true },
     lipsync: { ...DEFAULT_LIPSYNC, mergeWithActive: true },
-    item: { category: '', name: '', newIds: true, bakeSize: 1024, bakeDistance: 0.05, bakeMaterial: '' },
-    diva: { outputName: 'mikitm901', objectName: 'MIKITM901', objectId: 901, objectSetId: 3901, textureIdBase: '', singleObject: true, compactVertices: true, includeSkinParamInFarc: false, compress: true },
+    item: { category: '', name: '', newIds: true, bakeSize: 1024, bakeDistance: 0.05, bakeMaterial: '',
+      hairPoints: 10, hairMaxStrands: 120, hairSectors: 36, hairPerGroup: 16, showHair: true, parentBone: 'J_Bip_C_Head', keepWorld: true },
+    pose: { ...DEFAULT_POSE_OPTIONS },
+    diva: { outputName: 'mikitm901', objectName: 'MIKITM901', objectId: 901, objectSetId: 3901, textureIdBase: '', singleObject: true, compactVertices: true, includeSkinParamInFarc: false, compress: true, skinParamFileName: '' },
     export: { target: 'vroid', format: 'fbx', units: 'cm', clips: 'all' },
   },
 };
@@ -62,6 +68,8 @@ const busy = h('div', { class: 'busy hidden' }, h('div', { class: 'spinner' }), 
 const timeSlider = h('input', { type: 'range', min: 0, max: 1, step: 0.001, value: 0, class: 'time' });
 const frameLabel = h('span', { class: 'frame' }, 'frame 0 / 0');
 const playBtn = h('button', { class: 'btn' }, '▶');
+const viewSelect = h('select', { class: 'view-select', title: 'Which models to preview', onchange: (e) => viewer.setViewMode(e.target.value) },
+  ...[['side', 'View: both, side by side'], ['both', 'View: both, overlapping'], ['vroid', 'View: VRoid model only'], ['other', 'View: secondary model only']].map(([v, t]) => h('option', { value: v }, t)));
 const clipSelect = h('select', { class: 'clip-select' });
 
 app.append(
@@ -72,7 +80,9 @@ app.append(
     button('Import audio…', () => importAudio()),
     button('Import .farc…', () => importFarc()),
     button('Frame all', () => viewer.frame()),
-    field('Side by side', { v: false }, 'v', 'checkbox', { onChange: (v) => { viewer.sideBySide = v; viewer.layout(); } }),
+    button('↶ Undo', () => undo(), { title: 'Undo (Ctrl+Z)' }),
+    button('↷ Redo', () => redo(), { title: 'Redo (Ctrl+Y / Ctrl+Shift+Z)' }),
+    viewSelect,
     field('Skeleton', { v: true }, 'v', 'checkbox', { onChange: (v) => { viewer.showSkeleton = v; viewer.refreshHelpers(); } }),
   ),
   h('main', { class: 'main' },
@@ -88,6 +98,7 @@ app.append(
 function viewer_loop() { return { v: true }; }
 
 const viewer = new Viewer(viewport);
+viewer.onViewChange = (mode) => { viewSelect.value = mode; };
 viewer.onTime = (t) => {
   timeSlider.max = Math.max(viewer.duration, 0.001);
   timeSlider.value = t;
@@ -104,14 +115,57 @@ function log(msg, kind = 'info') {
   logEl.prepend(line);
   if (kind === 'error') console.error(msg); else console.log(msg);
 }
-async function run(label, fn) {
+const history = new History(12);
+/** Run an action with a busy overlay. Actions that change the scene are undoable unless {undo:false}. */
+const NO_UNDO = /^(Exporting|Saving|Merging|Decoding audio|Loading profile|Previewing)/;
+async function run(label, fn, { undo: undoable = !NO_UNDO.test(label) } = {}) {
   busy.querySelector('.busy-text').textContent = `${label}…`;
   busy.classList.remove('hidden');
   await new Promise((r) => setTimeout(r, 30));
-  try { const r = await fn(); return r; }
-  catch (e) { log(`${label} failed: ${e.message ?? e}`, 'error'); console.error(e); return null; }
+  let snap = null;
+  if (undoable) { try { snap = snapshotState(state); } catch (e) { console.warn('snapshot failed', e); } }
+  try {
+    const r = await fn();
+    if (snap) history.push({ label, snap });
+    return r;
+  } catch (e) { log(`${label} failed: ${e.message ?? e}`, 'error'); console.error(e); return null; }
   finally { busy.classList.add('hidden'); refreshScenePanel(); }
 }
+
+function applySnapshot(snap) {
+  viewer.stop('vroid'); viewer.stop('other');
+  state.vroid = snap.vroid;
+  state.other = snap.other;
+  state.clips = snap.clips;
+  state.item = snap.item ? { name: snap.item.name, item: readCustomItem(snap.item.bytes) } : null;
+  restoreDivaFlags(state, snap.divaFlags);
+  viewer.setSlot('vroid', state.vroid?.root ?? null);
+  viewer.setSlot('other', state.other?.root ?? null);
+  rebuildDivaPreview();
+  refreshHairPreview();
+  setActiveClip(state.clips[snap.activeIndex] ?? null);
+  refreshScenePanel();
+  showTab(currentTab);
+}
+function undo() {
+  if (!history.canUndo) return log('Nothing to undo.');
+  const label = history.undoStack[history.undoStack.length - 1].label;
+  const prev = history.undo({ label, snap: snapshotState(state) });
+  applySnapshot(prev.snap);
+  log(`Undid: ${label}`);
+}
+function redo() {
+  if (!history.canRedo) return log('Nothing to redo.');
+  const next = history.redo({ label: history.redoStack[history.redoStack.length - 1].label, snap: snapshotState(state) });
+  applySnapshot(next.snap);
+  log(`Redid: ${next.label}`);
+}
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName ?? '') && document.activeElement.type !== 'range' && document.activeElement.type !== 'checkbox') return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+});
 const baseName = (n) => (n ?? 'model').replace(/\.[^.]+$/, '');
 const need = (cond, msg) => { if (!cond) throw new Error(msg); };
 
@@ -180,7 +234,9 @@ async function importOther() {
   await run(`Loading ${f.name}`, async () => {
     const loaded = await loadModelFile(f.name, f.bytes, f.siblings);
     state.other = { root: loaded.root, loaded, humanoid: loaded.humanoid, kind: loaded.kind, name: baseName(f.name), converted: false };
+    if (viewer.viewMode === 'vroid') viewer.viewMode = 'side';
     viewer.setSlot('other', loaded.root);
+    viewer.setViewMode(viewer.viewMode);
     viewer.frame();
     log(`Loaded ${f.name}: ${loaded.kind}, ${loaded.rigged ? 'rigged' : loaded.humanoid ? 'skeleton only' : 'not rigged'}, ${loaded.clips.length} animation(s).`);
     if (loaded.kind === 'animation' && state.vroid) {
@@ -415,9 +471,10 @@ function animTab() {
       row(
         button('Export current frame as .vroidpose', () => run('Exporting pose', async () => {
           need(state.vroid, 'Load a VRoid model first.');
-          const pose = exportVRoidPose(state.vroid.root);
+          const pose = exportVRoidPose(state.vroid.root, state.options.pose);
           const frame = Math.round(viewer.time * viewer.fps);
-          await saveFile(`${state.vroid.name}_${state.active?.name ?? 'pose'}_f${frame}.vroidpose`, new TextEncoder().encode(JSON.stringify(pose, null, 2)), [{ name: 'VRoid pose', extensions: ['vroidpose'] }]);
+          const safe = (n) => String(n).replace(/[\\/:*?"<>|]/g, '_');
+          await saveFile(safe(`${state.vroid.name}_${state.active?.name ?? 'pose'}_f${frame}.vroidpose`), new TextEncoder().encode(stringifyVRoidPose(pose)), [{ name: 'VRoid pose', extensions: ['vroidpose'] }]);
           log(`Saved pose at frame ${frame}.`);
         }), { primary: true }),
         button('Apply .vroidpose…', () => run('Applying pose', async () => {
@@ -429,7 +486,12 @@ function animTab() {
           if (unknown.length) log(`Unknown bones in pose: ${unknown.join(', ')}`, 'warn');
         })),
         button('Reset pose', () => { setActiveClip(null); viewer.stop('vroid'); }),
-      )),
+      ),
+      h('details', {}, h('summary', {}, 'Pose file options'),
+        field('Left hand preset', state.options.pose, 'leftHand', 'text'),
+        field('Right hand preset', state.options.pose, 'rightHand', 'text'),
+        field('Also write finger bones', state.options.pose, 'includeFingers', 'checkbox', { title: 'VRoid normally takes fingers from the hand preset' }),
+        note('Hand presets set the finger shape in VRoid Studio (e.g. L_Open, R_Natural as written by VRoid). Copy the names from a pose saved in VRoid Studio for other hand shapes.'))),
     section('Head & eye motion',
       field('Head', H, 'mode', 'select', { options: [['keep', 'Keep original'], ['remove', 'Remove head motion'], ['lookAround', 'Look around'], ['fixed', 'Fixed direction']] }),
       field('Fixed: space', H, 'space', 'select', { options: [['local', 'Relative to body'], ['world', 'World (keeps looking that way)']] }),
@@ -474,9 +536,12 @@ function animTab() {
 function toolsTab() {
   const v = state.vroid;
   const so = state.options.shapeKeys;
-  const morphs = [];
-  if (v) v.root.traverse((m) => { if (m.isMesh && m.morphTargetDictionary) for (const [n, i] of Object.entries(m.morphTargetDictionary)) morphs.push([m, n, i]); });
-  const sliders = morphs.slice(0, 400).map(([m, n, i]) => field(`${m.name}: ${n}`, m.morphTargetInfluences, i, 'range', { min: 0, max: 1 }));
+  const keys = v ? listShapeKeys(v.root) : new Map();
+  const weights = {};
+  for (const [name, list] of keys) weights[name] = list[0].mesh.morphTargetInfluences[list[0].index] ?? 0;
+  const sliders = [...keys.keys()].map((name) => field(`${name}${keys.get(name).length > 1 ? ` (${keys.get(name).length} meshes)` : ''}`, weights, name, 'range',
+    { min: 0, max: 1, onChange: (w) => { setActiveClip(null); setShapeKeyWeight(v.root, name, w); } }));
+  const morphs = [...keys.keys()];
   return [
     section('Optimize (weld duplicate vertices)',
       note('Merges vertices of the same material that share a position.'),
@@ -510,7 +575,8 @@ function toolsTab() {
         log(`Added ${added.length} shape key(s).`);
         showTab('tools');
       })),
-      h('details', {}, h('summary', {}, `Preview shape keys (${morphs.length})`), ...sliders)),
+      h('details', { open: morphs.length < 80 }, h('summary', {}, `Preview shape keys (${morphs.length})`),
+        button('Reset all to 0', () => { for (const n of morphs) setShapeKeyWeight(v.root, n, 0); showTab('tools'); }), ...sliders)),
     section('Inverse kinematics',
       button(v?.root.userData.ik ? 'IK rig added' : 'Add IK rig (targets + poles)', () => run('Adding IK', () => {
         need(v, 'Load a VRoid model first.');
@@ -570,7 +636,7 @@ function cloneForConvert(model) {
 function showConvertedRig(out, label) {
   state.other = { root: out, loaded: { root: out, rigged: true, clips: [], fileName: label }, humanoid: { bones: out.userData.humanoid, facing: 1 }, kind: 'model', name: `${state.vroid.name} → ${label}`, converted: false, rigConverted: true };
   viewer.setSlot('other', out);
-  viewer.sideBySide = true; viewer.layout();
+  viewer.setViewMode('side');
   log(`Converted to ${label}. Export it from the Export tab (target: secondary).`);
   if (state.active) setActiveClip(state.active);
 }
@@ -586,7 +652,8 @@ function itemTab() {
       if (!f) return;
       state.item = { item: readCustomItem(f.bytes), name: baseName(f.name) };
       o.category = state.item.item.category?.key ?? '';
-      o.name = state.item.item.meta.name ?? baseName(f.name);
+      o.name = state.item.item.meta.displayName || state.item.item.meta.name || baseName(f.name);
+      refreshHairPreview();
       log(`Custom item: ${JSON.stringify(describeCustomItem(state.item.item))}`);
       showTab('item');
     }), { primary: true })))];
@@ -614,6 +681,45 @@ function itemTab() {
         replaceImage(it.item, img.id, await encodePng(baked));
         showTab('item');
       })))))));
+  // ---- hair items
+  let hairInfo = null;
+  if (family === 'hair') { try { hairInfo = decodeHair(it.item); } catch (e) { hairInfo = { error: e.message }; } }
+  if (hairInfo) {
+    els.push(section('VRoid hair',
+      hairInfo.error ? note(hairInfo.error) : note(`${hairInfo.groups.length} hair group(s), ${hairInfo.groups.reduce((a, g) => a + g.strands.length, 0)} strand(s). Shown on the VRoid model's head.`),
+      field('Show hair strands in the viewport', o, 'showHair', 'checkbox', { onChange: () => refreshHairPreview() }),
+      h('hr'),
+      note('Rebuild the secondary model as VRoid hair: each separate hair card/strand of the mesh (or, for a solid hair mesh, combed sectors around the head) becomes a VRoid brush-hair strand. This item is used as the template for strand width, material and shape settings. Hair physics (bounce groups) are removed and can be added again in VRoid Studio.'),
+      field('Control points per strand', o, 'hairPoints', 'number', { step: 1, min: 3, max: 30 }),
+      field('Max strands', o, 'hairMaxStrands', 'number', { step: 1, min: 1, max: 600 }),
+      field('Sectors (solid hair meshes)', o, 'hairSectors', 'number', { step: 1, min: 4, max: 180 }),
+      field('Strands per hair group', o, 'hairPerGroup', 'number', { step: 1, min: 1, max: 64 }),
+      button('Rebuild hair from secondary model', () => run('Rebuilding hair', () => {
+        need(state.other, 'Import the hair model as the secondary model first.');
+        const head = headRest();
+        const lines = viewer.aligned(() => extractStrands(state.other.root, head.center, { maxStrands: o.hairMaxStrands, pointsPerStrand: o.hairPoints, sectors: o.hairSectors }));
+        need(lines.length, 'No strands could be extracted from the secondary model.');
+        const r = rebuildHairItem(it.item, lines, head.matrix, { strandsPerGroup: o.hairPerGroup });
+        log(`Rebuilt hair: ${r.strands} strand(s) in ${r.groups} group(s) (template group ${r.templateGroup + 1}).`);
+        o.showHair = true;
+        refreshHairPreview();
+        showTab('item');
+      }), { primary: true })));
+  }
+  // ---- accessories: parent bone
+  const atts = findAttachments(it.item);
+  if (atts.length) {
+    if (!VROID_ATTACH_BONES.includes(o.parentBone)) o.parentBone = atts[0].bone;
+    els.push(section('Parent bone',
+      note(`Currently attached to ${[...new Set(atts.map((a) => a.bone))].join(', ')}.`),
+      field('New parent bone', o, 'parentBone', 'select', { options: VROID_ATTACH_BONES.map((b) => [b, b]) }),
+      field('Keep the accessory where it is', o, 'keepWorld', 'checkbox', { title: 'Adjusts the attachment offset by the distance between the old and new bone' }),
+      button('Set parent bone', () => run('Setting parent bone', () => {
+        const res = setAttachmentBone(it.item, o.parentBone, { keepWorld: o.keepWorld, boneRest: boneRestPosition });
+        log(`Accessory now attached to ${res.map((a) => a.bone).join(', ')}.`);
+        showTab('item');
+      }), { primary: true })));
+  }
   const mats = bakeTargets();
   els.push(section('Bake settings',
     field('VRoid material to bake onto', o, 'bakeMaterial', 'select', { options: [['', '(auto: match category)'], ...mats.map((m) => [m.label, m.label])] }),
@@ -629,6 +735,29 @@ function itemTab() {
         log('Custom item saved.');
       }), { primary: true }))));
   return els;
+}
+/** Rest pose of the VRoid head (world) — or a default VRoid head if no model is loaded. */
+function headRest() {
+  const H = state.vroid?.root.userData.humanoid;
+  if (H?.head) {
+    const rest = restSnapshot(state.vroid.root).head;
+    const matrix = new THREE.Matrix4().compose(rest.p.clone(), rest.q.clone(), new THREE.Vector3(1, 1, 1));
+    return { matrix, center: rest.p.clone().add(new THREE.Vector3(0, 0.08, 0.01)) };
+  }
+  const p = new THREE.Vector3(...VROID_REST.head);
+  return { matrix: new THREE.Matrix4().makeTranslation(p.x, p.y, p.z), center: p.clone().add(new THREE.Vector3(0, 0.08, 0.01)) };
+}
+function boneRestPosition(name) {
+  const h = HUMANOID_FROM_VROID[name];
+  const H = state.vroid?.root.userData.humanoid;
+  if (h && H?.[h]) return restSnapshot(state.vroid.root)[h]?.p ?? null;
+  return h ? new THREE.Vector3(...VROID_REST[h]) : null;
+}
+function refreshHairPreview() {
+  viewer.setSlot('hair', null);
+  const it = state.item;
+  if (!it || it.item.category?.family !== 'hair' || !state.options.item.showHair) return;
+  try { viewer.setSlot('hair', hairPreview(decodeHair(it.item), headRest().matrix)); } catch (e) { console.warn(e); }
 }
 function bakeTargets() {
   const out = [];
@@ -661,6 +790,16 @@ function lipsyncTab() {
     field('Release', o, 'release', 'range', { min: 0.05, max: 1 }),
     field('Max weight', o, 'maxWeight', 'range', { min: 0.1, max: 1 }),
     field('Close mouth between words', o, 'closeMouthBetweenWords', 'checkbox'),
+    h('hr'),
+    field('Voice focus', o, 'voiceFocus', 'select', { options: [['off', 'Off (clean voice recordings)'], ['band', 'Voice band only'], ['isolate', 'Isolate vocals from music / noise']],
+      title: 'Isolate: keeps the centre of the stereo mix (where vocals usually sit), the voice frequency band, and subtracts the steady music/noise floor.' }),
+    field('Noise / music reduction', o, 'noiseReduction', 'range', { min: 0, max: 1 }),
+    field('Centre-vocal focus (stereo)', o, 'centerFocus', 'range', { min: 0, max: 1 }),
+    field('Voice band low (Hz)', o, 'voiceLowHz', 'number', { step: 10, min: 20 }),
+    field('Voice band high (Hz)', o, 'voiceHighHz', 'number', { step: 100, min: 500 }),
+    field('Voicing threshold (ignore non-voice sounds)', o, 'voicingThreshold', 'range', { min: 0, max: 0.95, title: '0 = off. Frames without a clear pitch (drums, hiss, effects) keep the mouth closed.' }),
+    row(button('Preset: speech over background noise', () => { Object.assign(o, { voiceFocus: 'band', noiseReduction: 0.5, voicingThreshold: 0.45 }); showTab('lipsync'); }),
+      button('Preset: singing over music', () => { Object.assign(o, { voiceFocus: 'isolate', noiseReduction: 0.7, centerFocus: 0.85, voicingThreshold: 0.5 }); showTab('lipsync'); })),
     field('Combine with active body animation', o, 'mergeWithActive', 'checkbox'),
     row(button('Generate lip sync', () => run('Analysing audio', () => {
       need(state.vroid && state.audio, 'Needs a VRoid model and an audio file.');
@@ -710,10 +849,20 @@ function divaTab() {
       field('Merge into a single object', o, 'singleObject', 'checkbox'),
       field('Remove unused vertices', o, 'compactVertices', 'checkbox'),
       field('Put skin_param txt inside the .farc too', o, 'includeSkinParamInFarc', 'checkbox'),
+      field('Skin param file name (blank = ext_skp_<object>__divskn.txt)', o, 'skinParamFileName', 'text'),
+      row(button('Load template skin_param .txt…', () => run('Loading template', async () => {
+        const [f] = await openFiles({ filters: [{ name: 'Skin parameters', extensions: ['txt'] }] });
+        if (!f) return;
+        state.diva.template = readSkinParams(new TextDecoder().decode(f.bytes));
+        state.diva.templateName = f.name;
+        log(`Template skin_param ${f.name}: ${state.diva.template.size} osage entries. Osage blocks without their own parameters will copy the closest-named entry.`);
+        showTab('diva');
+      })), state.diva.template ? button('Clear template', () => { state.diva.template = null; showTab('diva'); }) : null),
+      note(state.diva.template ? `Template: ${state.diva.templateName} (${state.diva.template.size} entries)` : 'No template: osage blocks without imported parameters get defaults without body collisions.'),
       field('Compress (FArC)', o, 'compress', 'checkbox'),
       button('Merge & export…', () => run('Merging', async () => {
         need(state.diva.sources.length, 'Import at least one .farc.');
-        const res = mergeDivaSources(state.diva.sources, { ...o, textureIdBase: o.textureIdBase === '' ? null : Number(o.textureIdBase) });
+        const res = mergeDivaSources(state.diva.sources, { ...o, textureIdBase: o.textureIdBase === '' ? null : Number(o.textureIdBase), skinParamTemplate: state.diva.template ?? null, skinParamFileName: o.skinParamFileName.trim() || null });
         for (const r of res.report) log(r);
         const saved = await saveFile(res.farcName, res.farc, [{ name: 'FARC', extensions: ['farc'] }]);
         if (!saved) return;
@@ -736,7 +885,7 @@ async function importFarcSkp() {
 // ---- Export
 function exportTab() {
   const o = state.options.export;
-  const formats = [['fbx', 'FBX (binary 7.4)'], ['vrm1', 'VRM 1.0'], ['vrm0', 'VRM 0.x'], ['glb', 'GLB'], ['gltf', 'glTF (JSON)']];
+  const formats = [['fbx', 'FBX (binary 7.4)'], ['dae', 'COLLADA (.dae)'], ['vrm1', 'VRM 1.0'], ['vrm0', 'VRM 0.x'], ['glb', 'GLB'], ['gltf', 'glTF (JSON)']];
   return [section('Export',
     field('What', o, 'target', 'select', { options: [['vroid', 'VRoid model'], ['other', 'Secondary model (e.g. converted rig)'], ['clips', 'Animations only (VRoid skeleton)']] }),
     field('Format', o, 'format', 'select', { options: formats }),
@@ -759,6 +908,17 @@ async function doExport() {
   }
   viewer.stop('vroid'); viewer.stop('other');
   let bytes, extName;
+  if (o.format === 'dae') {
+    const hidden = o.target === 'clips' ? meshesOf(root).map((m) => [m, m.parent]) : [];
+    for (const [m, p] of hidden) p.remove(m);
+    let res;
+    try { res = await exportCollada(root, { clips: o.target === 'other' ? [] : clips, name }); } finally { for (const [m, p] of hidden) p.add(m); }
+    const daeBytes = new TextEncoder().encode(res.dae);
+    const saved = await saveFiles(`${name}.dae`, daeBytes, [{ name: 'COLLADA', extensions: ['dae'] }], res.files);
+    if (saved) log(`Exported ${name}.dae with ${res.files.length} texture file(s) (${(daeBytes.length / 1048576).toFixed(2)} MB).`);
+    if (state.active) setActiveClip(state.active);
+    return;
+  }
   if (o.format === 'fbx') {
     if (o.target === 'clips') {
       // skeleton-only FBX: hide meshes
@@ -804,4 +964,4 @@ refreshScenePanel();
 refreshClipSelect();
 showTab('convert');
 log('Ready. Import a VRoid model, then a model, animation, audio or .farc. Files can also be dropped on the viewport.');
-window.__vsc = { state, viewer };
+window.__vsc = { state, viewer, history };

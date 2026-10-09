@@ -37,10 +37,15 @@ ipcMain.handle('open-files', async (_e, opts = {}) => {
   return Promise.all(r.filePaths.map(async (p) => ({ name: path.basename(p), path: p, bytes: new Uint8Array(await fs.readFile(p)) })));
 });
 
-ipcMain.handle('save-file', async (_e, { defaultName, bytes, filters }) => {
+ipcMain.handle('save-file', async (_e, { defaultName, bytes, filters, extraFiles }) => {
   const r = await dialog.showSaveDialog(win, { defaultPath: defaultName, filters: [...(filters ?? []), { name: 'All files', extensions: ['*'] }] });
   if (r.canceled || !r.filePath) return null;
   await fs.writeFile(r.filePath, Buffer.from(bytes));
+  // Extra files (textures of a .dae, etc.) go next to the main file; names are reduced to a base name.
+  for (const f of extraFiles ?? []) {
+    const name = path.basename(String(f.name)).replace(/[<>:"/\\|?*]/g, '_');
+    if (name) await fs.writeFile(path.join(path.dirname(r.filePath), name), Buffer.from(f.bytes));
+  }
   return r.filePath;
 });
 

@@ -82,7 +82,7 @@ export async function loadModelFile(name, bytes, siblings = null) {
     case 'dae': {
       const r = new ColladaLoader(manager).parse(new TextDecoder().decode(bytes), '');
       root = r.scene;
-      clips = r.animations ?? [];
+      clips = r.scene.animations?.length ? r.scene.animations : (r.animations ?? []);
       break;
     }
     default:

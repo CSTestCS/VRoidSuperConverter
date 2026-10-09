@@ -42,3 +42,11 @@ export async function readSiblings(path) {
   if (!api || !path) return null;
   return api.readSiblings(path);
 }
+
+/** Save a main file plus extra files written next to it (e.g. a .dae and its textures). */
+export async function saveFiles(defaultName, bytes, filters = [], extraFiles = []) {
+  if (api) return api.saveFile({ defaultName, bytes, filters, extraFiles });
+  const saved = await saveFile(defaultName, bytes, filters);
+  for (const f of extraFiles) await saveFile(f.name, f.bytes);
+  return saved;
+}
