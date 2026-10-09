@@ -219,22 +219,32 @@ export function mergeDivaSources(sources, opts) {
   const texList = textureIds.filter((id) => textureBlobs.has(id));
   const set = { objects, textureIds: texList.map((id) => texIdRemap?.get(id) ?? id), format };
 
-  // Skin parameters
+  // Skin parameters: imported ext_skp files first (case-insensitive), then the template file
+  // (exact name, then the most similar osage name), then defaults derived from the block.
+  const imported = new Map();
+  for (const src of sources) for (const [k, v] of src.skinParams) if (!imported.has(k.toLowerCase())) imported.set(k.toLowerCase(), v);
+  const template = opts.skinParamTemplate ?? null; // Map from readSkinParams
   const params = [];
+  let generated = 0;
   for (const obj of objects) {
     for (const b of obj.skin?.blocks ?? []) {
       if (b.type !== 'OSG' && b.type !== 'CLS') continue;
       const key = b.type === 'OSG' ? b.externalName : b.name;
       if (!key) continue;
-      let p = null;
-      for (const src of sources) if (src.skinParams.has(key)) { p = structuredClone(src.skinParams.get(key)); break; }
-      if (!p && b.type === 'OSG') { p = skinParamFromOsageBlock(b, opts.physicsDefaults); report.push(`  generated skin_param for ${key}`); }
-      if (!p && b.type === 'CLS') p = { ...skinParamFromOsageBlock({ externalName: key, nodes: [], internalSkinParam: b.internalSkinParam }, opts.physicsDefaults) };
+      let p = imported.get(key.toLowerCase()) ? structuredClone(imported.get(key.toLowerCase())) : null;
+      if (!p && template?.size) {
+        const exact = [...template.keys()].find((k) => k.toLowerCase() === key.toLowerCase());
+        const similar = exact ?? mostSimilarParam(key, [...template.keys()]);
+        if (similar) { p = structuredClone(template.get(similar)); report.push(`  skin_param for ${key} taken from template entry ${similar}`); }
+      }
+      if (!p && b.type === 'OSG') { p = skinParamFromOsageBlock(b, opts.physicsDefaults); generated++; report.push(`  generated default skin_param for ${key}`); }
+      if (!p && b.type === 'CLS') { p = { ...skinParamFromOsageBlock({ externalName: key, nodes: [], internalSkinParam: b.internalSkinParam }, opts.physicsDefaults) }; generated++; }
       if (p) { p.name = key; if (b.type === 'OSG' && p.nodes.length !== b.nodes.length) p.nodes = resizeNodes(p.nodes, b.nodes.length); params.push(p); }
     }
   }
+  if (generated) report.push(`! ${generated} skin parameter(s) had no source and use defaults without body collisions. Import the original ext_skp_*.txt files (or a template) for correct physics.`);
   const skinParamText = writeSkinParams(params);
-  const skinParamName = `ext_skp_${objects[0].name.toLowerCase()}.txt`;
+  const skinParamName = opts.skinParamFileName || `ext_skp_${objects[0].name.toLowerCase()}__divskn.txt`;
 
   const objBin = writeObjectSet(set, format);
   const texBin = writeTextureSet(texList.map((id) => textureBlobs.get(id)));
@@ -254,6 +264,23 @@ export function mergeDivaSources(sources, opts) {
 
   report.push(`= ${objects.length} object(s), ${objects.reduce((a, o) => a + o.meshes.length, 0)} mesh(es), ${set.textureIds.length} texture(s), ${params.length} skin parameter(s)`);
   return { farc, farcName: `${outputName}.farc`, objBin, texBin, skinParamText, skinParamName, objDb, texDb, set, report, finalTexIds };
+}
+
+/** Pick the template osage name most similar to `name` (same prefix family, side and index preferred). */
+export function mostSimilarParam(name, candidates) {
+  const tok = (n) => n.toLowerCase().replace(/_osg$/, '').replace(/^c_/, '').split(/[_\d]+/).filter((t) => t.length > 1);
+  const side = (n) => (/_l(_|\d|$)/i.test(n) ? 'l' : /_r(_|\d|$)/i.test(n) ? 'r' : '');
+  const num = (n) => Number((n.match(/(\d+)(?!.*\d)/) ?? [])[1] ?? -1);
+  const a = tok(name);
+  let best = null, bestScore = 0;
+  for (const c of candidates) {
+    const b = tok(c);
+    let score = a.filter((t) => b.includes(t)).length * 3 - Math.abs(a.length - b.length);
+    if (side(c) === side(name)) score += 1;
+    if (num(c) === num(name)) score += 1;
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return bestScore >= 3 ? best : null;
 }
 
 function resizeNodes(nodes, n) {

@@ -5,7 +5,8 @@ import { readFarc, writeFarc } from '../src/diva/farc.js';
 import { readObjectSet, writeObjectSet, MATERIAL_SIZE, triangleIndices } from '../src/diva/objset.js';
 import { readTextureSet, writeTextureSet, decodeTexture } from '../src/diva/texset.js';
 import { readSkinParams, writeSkinParams } from '../src/diva/skinParam.js';
-import { loadDivaSource, mergeDivaSources, readObjectDatabase } from '../src/diva/divaMerge.js';
+import { loadDivaSource, mergeDivaSources, readObjectDatabase, mostSimilarParam } from '../src/diva/divaMerge.js';
+import { readFileSync } from 'node:fs';
 import { aesDecryptEcb, aesDecryptCbc, aesEncryptEcb } from '../src/diva/aes.js';
 import { BinWriter } from '../src/diva/binary.js';
 
@@ -181,9 +182,27 @@ test('Merging two farcs with sub-mesh removal unifies bones, blocks, textures an
   const skp = readSkinParams(res.skinParamText);
   assert.equal(skp.get('c_skirt_osg').hingeY, 45);
   assert.equal(skp.get('c_hair_a_osg').nodes.length, 1);
-  assert.equal(res.skinParamName, 'ext_skp_mikitm901.txt');
+  assert.equal(res.skinParamName, 'ext_skp_mikitm901__divskn.txt');
   const db = readObjectDatabase(res.objDb);
   assert.equal(db[0].fileName, 'mikitm901_obj.bin');
   assert.deepEqual(db[0].objects, [{ id: 901, name: 'MIKITM901' }]);
   assert.ok(res.texDb.length > 0);
+});
+
+test('real Mega Mix+ skin param file round-trips byte for byte and fills missing params from a template', () => {
+  const text = readFileSync(new URL('./fixtures/ext_skp_mikitm001_joha_outer_01__divskn.txt', import.meta.url), 'utf8');
+  const params = readSkinParams(text);
+  assert.equal(params.size, 43);
+  assert.equal(writeSkinParams(params.values()), text);
+  assert.equal(params.get('c_belt_osg').collisions[0].bone0.name, 'j_momo_l_wj');
+  assert.equal(mostSimilarParam('c_skirt_l_03_osg', [...params.keys()]), 'c_skirt_l_03_osg');
+  assert.equal(mostSimilarParam('c_skirt_b_osg', [...params.keys()]).startsWith('c_skirt'), true);
+  assert.equal(mostSimilarParam('c_hair_osg', ['c_belt_osg']), null);
+
+  const a = makeSet('MIKITM001', ['n_hara_cp', 'kl_mune_b_wj', 'j_kao_wj'], 'e_hair_a', osage('c_skirt_l_02_osg', ['j_s_000', 'j_s_001', 'j_s_002']), 100);
+  const src = loadDivaSource('a.farc', writeFarc([{ name: 'mikitm001_obj.bin', data: writeObjectSet(a) }]));
+  const res = mergeDivaSources([src], { outputName: 'x', objectName: 'X', skinParamTemplate: params });
+  const out = readSkinParams(res.skinParamText).get('c_skirt_l_02_osg');
+  assert.equal(out.nodes.length, 3, 'node count follows the osage block');
+  assert.ok(out.collisions.length > 0, 'body collisions copied from the template');
 });
