@@ -30,6 +30,7 @@ export const CATEGORIES = [
   { key: 'arm-accessory', label: 'Arm accessory', suffix: 'ArmAccessory', family: 'accessory' },
   { key: 'leg-accessory', label: 'Leg accessory', suffix: 'LegAccessory', family: 'accessory' },
   { key: 'glasses', label: 'Glasses', suffix: 'Glasses', family: 'accessory' },
+  { key: 'hat', label: 'Hat', suffix: 'Hat', family: 'accessory' },
 ].map((c) => ({ ...c, groupTypeId: `TransferableGroupType.N00.Level1.${c.suffix}`, transferableType: `TransferableType.N00.${c.suffix}` }));
 
 export const categoryByGroupId = (id) => CATEGORIES.find((c) => c.groupTypeId === id) ?? null;
@@ -56,7 +57,7 @@ function varint(v) {
   out.push(v);
   return Uint8Array.from(out);
 }
-function concat(parts) {
+export function concat(parts) {
   const n = parts.reduce((s, p) => s + p.length, 0);
   const out = new Uint8Array(n);
   let o = 0;
@@ -86,7 +87,7 @@ export function parseFields(b) {
   return fields;
 }
 
-const textOf = (f) => {
+export const textOf = (f) => {
   if (f.wire !== 2) return null;
   try {
     const s = new TextDecoder('utf-8', { fatal: true }).decode(f.value);
@@ -96,7 +97,7 @@ const textOf = (f) => {
 const isPng = (b) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
 const isJpg = (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
 
-function encodeField(number, wire, value) {
+export function encodeField(number, wire, value) {
   const key = varint(number * 8 + wire);
   if (wire === 2) return concat([key, varint(value.length), value]);
   return concat([key, value instanceof Uint8Array ? value : varint(value)]);
