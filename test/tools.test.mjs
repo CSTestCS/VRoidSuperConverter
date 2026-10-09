@@ -5,9 +5,9 @@ import { skinnedPerson, mixamoSpec } from './helpers.mjs';
 import { convertToVRoid, worldPos } from '../src/core/retarget.js';
 import { editHeadMotion } from '../src/core/headControl.js';
 import { weldGeometry } from '../src/core/optimize.js';
-import { addAsymmetricShapeKeys, renameShapeKeys, readableShapeKeyName } from '../src/core/shapeKeys.js';
+import { addAsymmetricShapeKeys, renameShapeKeys, readableShapeKeyName, listShapeKeys, setShapeKeyWeight } from '../src/core/shapeKeys.js';
 import { solveTwoBone, addIKRig, solveModelIK, bakeIKToClip } from '../src/core/ik.js';
-import { analyzeLipSync, formants, lipSyncClip } from '../src/core/lipsync.js';
+import { analyzeLipSync, formants, lipSyncClip, isolateVoice } from '../src/core/lipsync.js';
 import { exportVRoidPose, applyVRoidPose, storeRestPose, stringifyVRoidPose } from '../src/formats/vroidPose.js';
 
 const vroid = () => { const m = convertToVRoid(skinnedPerson(mixamoSpec('mixamorig')).root); storeRestPose(m); return m; };
@@ -171,4 +171,48 @@ test('vroidpose matches the VRoid Studio layout and round-trips a real pose file
   const m2 = vroid();
   m2.userData.humanoid.leftUpperArm.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.8);
   assert.ok(exportVRoidPose(m2).BoneDefinition.LeftUpperArm.z > 0);
+});
+
+test('lip sync voice focus ignores panned music and noise between words', () => {
+  const rate = 16000;
+  const a = vowel(850, 1400, rate, 0.4);
+  const gap = new Float32Array(Math.round(rate * 0.4));
+  const voice = Float32Array.from([...a, ...gap, ...a]);
+  const n = voice.length;
+  let seed = 3; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  const L = new Float32Array(n), R = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const music = 0.25 * Math.sign(Math.sin(2 * Math.PI * 330 * t)) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 2 * t)); // square-ish synth, hard left
+    L[i] = voice[i] + music + 0.05 * rnd();
+    R[i] = voice[i] + 0.05 * rnd();
+  }
+  const at = (frames, sec) => frames[Math.round(sec * 30)];
+  const plain = analyzeLipSync({ channels: [L, R], sampleRate: rate }, { attack: 1, release: 1 });
+  const focused = analyzeLipSync({ channels: [L, R], sampleRate: rate }, { attack: 1, release: 1, voiceFocus: 'isolate', voicingThreshold: 0.5 });
+  const open = (f) => f.A + f.I + f.U + f.E + f.O;
+  assert.ok(open(at(plain, 0.6)) > 0.2, 'without voice focus the music opens the mouth in the gap');
+  assert.ok(open(at(focused, 0.6)) < 0.05, `with voice focus the gap stays closed (${open(at(focused, 0.6))})`);
+  assert.ok(at(focused, 0.2).A > 0.4, `vowel still detected (${JSON.stringify(at(focused, 0.2))})`);
+  assert.ok(isolateVoice([L, R], rate, { voiceFocus: 'isolate', noiseReduction: 0.6, voiceLowHz: 90, voiceHighHz: 4000, centerFocus: 0.8 }).length === n);
+});
+
+test('shape key rename replaces prefixed VRoid names on every primitive; grouped preview drives all meshes', () => {
+  const g = new THREE.Group();
+  for (let k = 0; k < 3; k++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1));
+    m.morphTargetDictionary = { 'Face_Blendshape.Fcl_EYE_Close': 0, 'Face_Blendshape.Fcl_MTH_A': 1 };
+    m.morphTargetInfluences = [0, 0];
+    g.add(m);
+  }
+  const map = renameShapeKeys(g, 'readable');
+  assert.equal(map['Face_Blendshape.Fcl_EYE_Close'], 'Eyes.Blink');
+  for (const m of g.children) assert.deepEqual(Object.keys(m.morphTargetDictionary), ['Eyes.Blink', 'Viseme.A']);
+  const keys = listShapeKeys(g);
+  assert.deepEqual([...keys.keys()], ['Eyes.Blink', 'Viseme.A']);
+  assert.equal(keys.get('Eyes.Blink').length, 3);
+  setShapeKeyWeight(g, 'Eyes.Blink', 0.7);
+  for (const m of g.children) assert.equal(m.morphTargetInfluences[0], 0.7);
+  renameShapeKeys(g, 'vroid');
+  assert.deepEqual(Object.keys(g.children[0].morphTargetDictionary), ['Fcl_EYE_Close', 'Fcl_MTH_A']);
 });

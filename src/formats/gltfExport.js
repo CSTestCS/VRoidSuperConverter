@@ -4,6 +4,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { VRM0_NAME, VROID_SHAPE_KEYS } from '../core/vroidSkeleton.js';
 import { skinnedMeshesOf, meshesOf } from '../core/skinning.js';
+import { splitShapeKeyName } from '../core/shapeKeys.js';
 
 // expression preset -> candidate morph names (VRoid "Fcl" names and our readable aliases)
 const EXPRESSIONS = {
@@ -86,7 +87,11 @@ function vrmPlugin(model, version, meta) {
           if (!m.isMesh || !m.morphTargetDictionary) return;
           const n = nodeOf(m);
           if (n === undefined) return;
-          for (const name of names) if (m.morphTargetDictionary[name] !== undefined) { out.push({ node: n, mesh: json.nodes[n].mesh, index: m.morphTargetDictionary[name] }); break; }
+          const keys = Object.keys(m.morphTargetDictionary);
+          for (const name of names) {
+            const key = keys.find((k) => k === name || splitShapeKeyName(k)[1] === name);
+            if (key !== undefined) { out.push({ node: n, mesh: json.nodes[n].mesh, index: m.morphTargetDictionary[key] }); break; }
+          }
         });
         return out;
       };

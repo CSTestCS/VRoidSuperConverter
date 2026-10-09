@@ -13,6 +13,13 @@ export const DEFAULT_LIPSYNC = {
   release: 0.35,
   maxWeight: 1.0,
   closeMouthBetweenWords: true,
+  // Voice targeting (for speech or singing over music / background noise)
+  voiceFocus: 'off',      // off | band (voice band only) | isolate (centre-channel vocals + noise subtraction)
+  noiseReduction: 0.6,    // 0..1 spectral subtraction strength
+  voiceLowHz: 90,
+  voiceHighHz: 4000,
+  centerFocus: 0.8,       // 0..1 how strongly side (non-centred) stereo content is removed
+  voicingThreshold: 0,    // 0..1; frames with weaker pitch periodicity than this are treated as non-voice
 };
 
 // Reference vowel formants (Hz) for an adult female voice, Japanese vowels.
@@ -126,7 +133,9 @@ export function vowelWeights(f1, f2, scale = 1) {
  */
 export function analyzeLipSync(audio, options = {}) {
   const o = { ...DEFAULT_LIPSYNC, ...options };
-  const { data, rate } = prepare(audio.channels, audio.sampleRate);
+  const channels = o.voiceFocus && o.voiceFocus !== 'off' ? [isolateVoice(audio.channels, audio.sampleRate, o)] : audio.channels;
+  const { data, rate } = prepare(channels, audio.sampleRate);
+  let voicedHold = 0;
   const hop = rate / o.fps;
   const win = Math.round(rate * 0.03);
   const frames = Math.max(1, Math.ceil(data.length / hop));
@@ -143,7 +152,13 @@ export function analyzeLipSync(audio, options = {}) {
     const db = 20 * Math.log10(rms + 1e-9);
     const open = THREE.MathUtils.clamp((db - o.silenceDb) / (o.fullDb - o.silenceDb), 0, 1);
     let target = { A: 0, I: 0, U: 0, E: 0, O: 0 };
-    if (open > 0 && frame.length > 32) {
+    let voiced = true;
+    if (o.voicingThreshold > 0 && open > 0 && frame.length > 32) {
+      if (periodicity(frame, rate) >= o.voicingThreshold) voicedHold = 2; // keep short consonants between vowels
+      else if (voicedHold > 0) voicedHold--;
+      else voiced = false;
+    }
+    if (open > 0 && voiced && frame.length > 32) {
       const fm = formants(frame, rate);
       const w = fm ? vowelWeights(fm[0], fm[1], o.formantScale) : last;
       last = w;
@@ -157,6 +172,115 @@ export function analyzeLipSync(audio, options = {}) {
     result.push({ t: f / o.fps, db, ...smooth });
   }
   return result;
+}
+
+// ------------------------------------------------------------------ voice targeting
+function fft(re, im, inverse = false) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inverse ? 2 : -2) * Math.PI) / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ar = re[i + k], ai = im[i + k];
+        const br = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+        const bi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ar + br; im[i + k] = ai + bi;
+        re[i + k + len / 2] = ar - br; im[i + k + len / 2] = ai - bi;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+}
+
+/**
+ * Pull the voice out of a mix: STFT, keep the centre of the stereo field (vocals are usually
+ * panned centre while instruments are spread), keep the voice band, then subtract a stationary
+ * noise/music floor estimated per frequency bin. Returns a mono signal at the input rate.
+ */
+export function isolateVoice(channels, sampleRate, o = DEFAULT_LIPSYNC) {
+  const N = 2048, hop = 512, bins = N / 2 + 1;
+  const L = channels[0], R = channels[1] ?? channels[0];
+  const len = L.length;
+  const frames = Math.max(1, Math.ceil((len - N) / hop) + 1);
+  const win = new Float32Array(N);
+  for (let i = 0; i < N; i++) win[i] = Math.sqrt(0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N));
+  const stereo = channels.length > 1;
+  const specRe = new Array(frames), specIm = new Array(frames), mags = new Array(frames);
+  const lo = Math.floor((o.voiceLowHz * N) / sampleRate), hi = Math.ceil((o.voiceHighHz * N) / sampleRate);
+  for (let f = 0; f < frames; f++) {
+    const lr = new Float64Array(N), li = new Float64Array(N), rr = new Float64Array(N), ri = new Float64Array(N);
+    for (let i = 0; i < N; i++) { const k = f * hop + i; lr[i] = (L[k] ?? 0) * win[i]; rr[i] = (R[k] ?? 0) * win[i]; }
+    fft(lr, li);
+    if (stereo) fft(rr, ri);
+    const re = new Float64Array(bins), im = new Float64Array(bins), mag = new Float64Array(bins);
+    for (let b = 0; b < bins; b++) {
+      let mr = stereo ? (lr[b] + rr[b]) / 2 : lr[b], mi = stereo ? (li[b] + ri[b]) / 2 : li[b];
+      if (stereo && o.voiceFocus === 'isolate') {
+        const sr = (lr[b] - rr[b]) / 2, si = (li[b] - ri[b]) / 2;
+        const m = Math.hypot(mr, mi), sd = Math.hypot(sr, si);
+        const centre = m / (m + sd + 1e-12); // 1 = perfectly centred
+        const gain = Math.pow(centre, 1 + 6 * o.centerFocus);
+        mr *= gain; mi *= gain;
+      }
+      if (b < lo || b > hi) { mr = 0; mi = 0; }
+      re[b] = mr; im[b] = mi; mag[b] = Math.hypot(mr, mi);
+    }
+    specRe[f] = re; specIm[f] = im; mags[f] = mag;
+  }
+  // stationary floor = 20th percentile magnitude of each bin over time
+  if (o.voiceFocus === 'isolate' && o.noiseReduction > 0 && frames > 4) {
+    const floor = new Float64Array(bins);
+    const col = new Float64Array(frames);
+    for (let b = lo; b <= Math.min(hi, bins - 1); b++) {
+      for (let f = 0; f < frames; f++) col[f] = mags[f][b];
+      const sorted = Float64Array.from(col).sort();
+      floor[b] = sorted[Math.floor(frames * 0.2)];
+    }
+    const alpha = 1 + 2 * o.noiseReduction;
+    for (let f = 0; f < frames; f++) for (let b = 0; b < bins; b++) {
+      const m = mags[f][b];
+      if (m <= 0) continue;
+      const g = Math.max(0.05 * (1 - o.noiseReduction), (m - alpha * floor[b]) / m);
+      specRe[f][b] *= g; specIm[f][b] *= g;
+    }
+  }
+  const out = new Float32Array(len);
+  for (let f = 0; f < frames; f++) {
+    const re = new Float64Array(N), im = new Float64Array(N);
+    for (let b = 0; b < bins; b++) { re[b] = specRe[f][b]; im[b] = specIm[f][b]; if (b > 0 && b < N / 2) { re[N - b] = specRe[f][b]; im[N - b] = -specIm[f][b]; } }
+    fft(re, im, true);
+    for (let i = 0; i < N; i++) { const k = f * hop + i; if (k < len) out[k] += re[i] * win[i] * (hop * 2 / N); }
+  }
+  return out;
+}
+
+/** Normalised autocorrelation peak in the 70–600 Hz pitch range (0 = noise, 1 = perfectly periodic). */
+export function periodicity(frame, rate) {
+  const n = frame.length;
+  let mean = 0;
+  for (const v of frame) mean += v;
+  mean /= n;
+  const x = Float32Array.from(frame, (v) => v - mean);
+  let e0 = 0;
+  for (const v of x) e0 += v * v;
+  if (e0 <= 1e-12) return 0;
+  let best = 0;
+  for (let lag = Math.floor(rate / 600); lag <= Math.min(n - 8, Math.ceil(rate / 70)); lag++) {
+    let c = 0, e1 = 0, e2 = 0;
+    for (let i = 0; i + lag < n; i++) { c += x[i] * x[i + lag]; e1 += x[i] * x[i]; e2 += x[i + lag] * x[i + lag]; }
+    const r = c / Math.sqrt(e1 * e2 + 1e-12);
+    if (r > best) best = r;
+  }
+  return best;
 }
 
 /** Build an AnimationClip driving the VRoid mouth morphs on every mesh that has them. */
