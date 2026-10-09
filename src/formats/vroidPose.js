@@ -28,40 +28,78 @@ const fromUnityQ = (q) => new THREE.Quaternion(q.x, -q.y, -q.z, q.w);
 const toUnityV = (v) => ({ x: -v.x, y: v.y, z: v.z });
 const fromUnityV = (v) => new THREE.Vector3(-v.x, v.y, v.z);
 
+// Bones VRoid Studio writes in BoneDefinition (fingers come from the hand animation presets).
+const POSE_BONES = ['Hips', 'Spine', 'Chest', 'UpperChest', 'Neck', 'Head', 'LeftShoulder', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand',
+  'RightShoulder', 'RightUpperArm', 'RightLowerArm', 'RightHand', 'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'LeftToes',
+  'RightUpperLeg', 'RightLowerLeg', 'RightFoot', 'RightToes'];
+
+export const DEFAULT_POSE_OPTIONS = {
+  leftHand: 'L_Natural', rightHand: 'R_Natural', leftHandWeight: 1, rightHandWeight: 1,
+  includeFingers: false, // VRoid drives fingers from the hand presets; enable to also write finger bones
+  morphs: false,
+};
+
+const round = (v) => Math.fround(v);
+const q4 = (q) => ({ x: round(q.x), y: round(q.y), z: round(q.z), w: round(q.w) });
+const v3 = (v) => ({ x: round(v.x), y: round(v.y), z: round(v.z) });
+
 /**
- * Pose rotations relative to the rest pose (VRoid rest bones have identity rotation, so for a
- * VRoid-converted model this equals the local rotation).
+ * Export the model's current pose in VRoid Studio's .vroidpose layout:
+ * { Version, Left/RightHandAnimationName/Weight, BoneDefinition: { HipsPosition, <UnityBone>: quaternion, ...,
+ *   SpineControlPointDeltaPosition } }. Rotations are local rotations relative to the T-pose rest, in Unity space.
  */
-export function exportVRoidPose(model, { morphs = true } = {}) {
+export function exportVRoidPose(model, options = {}) {
+  const o = { ...DEFAULT_POSE_OPTIONS, ...options };
   const H = model.userData.humanoid;
   const rest = model.userData.restLocal ?? {};
   model.updateMatrixWorld(true);
   const BoneDefinition = {};
-  for (const [h, unity] of Object.entries(UNITY_BONE)) {
-    const b = H[h];
+  if (H.hips) {
+    const root = H.hips.parent;
+    const hipsLocal = new THREE.Vector3().setFromMatrixPosition(H.hips.matrixWorld);
+    // relative to the model origin (VRoid's avatar root sits at the feet)
+    hipsLocal.applyMatrix4(model.matrixWorld.clone().invert());
+    void root;
+    BoneDefinition.HipsPosition = v3(toUnityV(hipsLocal));
+  }
+  const unityToH = Object.fromEntries(Object.entries(UNITY_BONE).map(([h, u]) => [u, h]));
+  const names = o.includeFingers ? Object.values(UNITY_BONE).filter((n) => !/Eye|Jaw/.test(n)) : POSE_BONES;
+  for (const unity of names) {
+    const b = H[unityToH[unity]];
     if (!b) continue;
     const r = rest[b.name]?.q ?? new THREE.Quaternion();
-    const q = r.clone().invert().multiply(b.quaternion);
-    const entry = { Rotation: toUnityQ(q) };
-    if (h === 'hips') {
-      const restP = rest[b.name]?.p ?? b.position;
-      entry.Position = toUnityV(new THREE.Vector3().setFromMatrixPosition(b.matrixWorld));
-      entry.LocalPositionDelta = toUnityV(b.position.clone().sub(restP));
-    }
-    BoneDefinition[unity] = entry;
+    const q = r.clone().invert().multiply(b.quaternion).normalize();
+    BoneDefinition[unity] = q4(toUnityQ(q));
   }
-  const BlendShapeProxyValues = {};
-  if (morphs) {
+  BoneDefinition.SpineControlPointDeltaPosition = { x: 0, y: 0, z: 0 };
+  const pose = {
+    Version: 1,
+    LeftHandAnimationName: o.leftHand, LeftHandAnimationWeight: o.leftHandWeight,
+    RightHandAnimationName: o.rightHand, RightHandAnimationWeight: o.rightHandWeight,
+    BoneDefinition,
+  };
+  if (o.morphs) {
+    const values = {};
     model.traverse((m) => {
       if (!m.isMesh || !m.morphTargetDictionary) return;
-      for (const [name, i] of Object.entries(m.morphTargetDictionary)) {
-        const v = m.morphTargetInfluences[i];
-        if (v > 1e-4) BlendShapeProxyValues[name] = Math.max(BlendShapeProxyValues[name] ?? 0, v);
-      }
+      for (const [name, i] of Object.entries(m.morphTargetDictionary)) if (m.morphTargetInfluences[i] > 1e-4) values[name] = m.morphTargetInfluences[i];
     });
+    pose.BlendShapeProxyValues = values;
   }
-  const hips = H.hips ? new THREE.Vector3().setFromMatrixPosition(H.hips.matrixWorld).y : 0;
-  return { FormatVersion: 1, HipsHeight: hips, BoneDefinition, BlendShapeProxyValues };
+  return pose;
+}
+
+/** Serialise like VRoid Studio (compact JSON, floats always with a decimal point for weights). */
+export function stringifyVRoidPose(pose) {
+  return JSON.stringify(pose, (k, v) => (typeof v === 'number' && !Number.isInteger(v) ? Number(v.toPrecision(9)) : v))
+    .replace(/"(LeftHandAnimationWeight|RightHandAnimationWeight)":(\d+)([,}])/g, '"$1":$2.0$3');
+}
+
+function readQuat(entry) {
+  if (!entry) return null;
+  const q = entry.Rotation ?? entry.rotation ?? entry;
+  if (q.w === undefined) return null;
+  return q;
 }
 
 /** Apply a .vroidpose (object) to a VRoid-rigged model. Returns names of unknown bones. */
@@ -71,22 +109,18 @@ export function applyVRoidPose(model, pose) {
   const unknown = [];
   const defs = pose.BoneDefinition ?? pose.Bones ?? {};
   for (const [unity, entry] of Object.entries(defs)) {
+    if (unity === 'HipsPosition' || unity === 'SpineControlPointDeltaPosition') continue;
     const h = FROM_UNITY[unity];
     const b = h ? H[h] : null;
-    if (!b) { unknown.push(unity); continue; }
-    const rot = entry.Rotation ?? entry.rotation;
-    if (rot) b.quaternion.copy((rest[b.name]?.q ?? new THREE.Quaternion()).clone().multiply(fromUnityQ(rot)));
-    if (h === 'hips') {
-      const restP = rest[b.name]?.p ?? b.position.clone();
-      if (entry.LocalPositionDelta) b.position.copy(restP.clone().add(fromUnityV(entry.LocalPositionDelta)));
-      else if (pose.HipsHeight != null && H.hips) {
-        // VRoid stores the hip height in metres; keep x/z from the rest pose
-        model.updateMatrixWorld(true);
-        const w = new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
-        const dy = pose.HipsHeight - w.y;
-        b.position.y += dy;
-      }
-    }
+    const rot = readQuat(entry);
+    if (!b || !rot) { unknown.push(unity); continue; }
+    b.quaternion.copy((rest[b.name]?.q ?? new THREE.Quaternion()).clone().multiply(fromUnityQ(rot)).normalize());
+  }
+  const hp = defs.HipsPosition ?? defs.Hips?.Position;
+  if (hp && H.hips) {
+    model.updateMatrixWorld(true);
+    const target = fromUnityV(hp).applyMatrix4(model.matrixWorld);
+    H.hips.position.copy(target.applyMatrix4(H.hips.parent.matrixWorld.clone().invert()));
   }
   const morphs = pose.BlendShapeProxyValues ?? {};
   model.traverse((m) => {

@@ -8,7 +8,7 @@ import { weldGeometry } from '../src/core/optimize.js';
 import { addAsymmetricShapeKeys, renameShapeKeys, readableShapeKeyName } from '../src/core/shapeKeys.js';
 import { solveTwoBone, addIKRig, solveModelIK, bakeIKToClip } from '../src/core/ik.js';
 import { analyzeLipSync, formants, lipSyncClip } from '../src/core/lipsync.js';
-import { exportVRoidPose, applyVRoidPose, storeRestPose } from '../src/formats/vroidPose.js';
+import { exportVRoidPose, applyVRoidPose, storeRestPose, stringifyVRoidPose } from '../src/formats/vroidPose.js';
 
 const vroid = () => { const m = convertToVRoid(skinnedPerson(mixamoSpec('mixamorig')).root); storeRestPose(m); return m; };
 const play = (model, clip, t) => {
@@ -145,18 +145,30 @@ test('lip sync detects formants and classifies vowels', () => {
   assert.equal(clip.tracks.length, 2);
 });
 
-test('vroidpose export/import round trip', () => {
+test('vroidpose matches the VRoid Studio layout and round-trips a real pose file', async () => {
+  const { readFileSync } = await import('node:fs');
+  const real = JSON.parse(readFileSync(new URL('./fixtures/MikuPose.vroidpose', import.meta.url), 'utf8'));
   const m = vroid();
-  const H = m.userData.humanoid;
-  H.leftUpperArm.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.8);
-  H.hips.position.y -= 0.05;
-  m.updateMatrixWorld(true);
-  const pose = JSON.parse(JSON.stringify(exportVRoidPose(m)));
-  assert.ok(pose.BoneDefinition.LeftUpperArm.Rotation);
-  // mirrored into Unity space: z rotation flips sign
-  assert.ok(pose.BoneDefinition.LeftUpperArm.Rotation.z > 0);
+  const unknown = applyVRoidPose(m, real);
+  assert.deepEqual(unknown, []);
+  const out = exportVRoidPose(m, { leftHand: real.LeftHandAnimationName, rightHand: real.RightHandAnimationName });
+  assert.equal(out.Version, 1);
+  assert.equal(out.LeftHandAnimationName, 'L_Open');
+  for (const [k, q] of Object.entries(real.BoneDefinition)) {
+    if (k === 'SpineControlPointDeltaPosition') continue;
+    const o = out.BoneDefinition[k];
+    assert.ok(o, k);
+    if (k === 'HipsPosition') { for (const c of ['x', 'y', 'z']) assert.ok(Math.abs(o[c] - q[c]) < 1e-4, `${k}.${c}`); continue; }
+    const a = new THREE.Quaternion(q.x, q.y, q.z, q.w).normalize(), b = new THREE.Quaternion(o.x, o.y, o.z, o.w);
+    assert.ok(a.angleTo(b) < 1e-3, `${k} rotation round-trips`);
+    assert.equal(o.Rotation, undefined, 'quaternions are stored directly, not wrapped');
+  }
+  // Same keys as VRoid writes
+  for (const k of Object.keys(real.BoneDefinition)) assert.ok(k in out.BoneDefinition, `has ${k}`);
+  const text = stringifyVRoidPose(out);
+  assert.match(text, /"LeftHandAnimationWeight":1\.0/);
+  // left arm lowering in our space (rotation about -Z) is stored with +z like VRoid's A-stance
   const m2 = vroid();
-  applyVRoidPose(m2, pose);
-  assert.ok(m2.userData.humanoid.leftUpperArm.quaternion.angleTo(H.leftUpperArm.quaternion) < 1e-5);
-  assert.ok(Math.abs(m2.userData.humanoid.hips.position.y - H.hips.position.y) < 1e-5);
+  m2.userData.humanoid.leftUpperArm.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.8);
+  assert.ok(exportVRoidPose(m2).BoneDefinition.LeftUpperArm.z > 0);
 });
