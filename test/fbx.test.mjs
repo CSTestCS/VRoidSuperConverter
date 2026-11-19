@@ -50,3 +50,33 @@ test('FBX export loads back with skeleton, skin, blend shapes and animation', as
   for (let i = 0; i < sk.geometry.attributes.position.count; i++) { sk.getVertexPosition(i, v); v.applyMatrix4(sk.matrixWorld); maxY = Math.max(maxY, v.y); }
   assert.ok(maxY > 150, `raised arm geometry reaches up (${maxY})`);
 });
+
+test('glTF/VRM UVs (top-left origin) are written bottom-left in FBX; FBX-sourced UVs are untouched', async () => {
+  const { markTopLeftUVs } = await import('../src/core/uv.js');
+  const { unzlibSync } = await import('fflate');
+  const make = (name) => {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.attributes.uv.setXY(0, 0.25, 0.1); // distinctive, not symmetric
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial()); m.name = name; return m;
+  };
+  const g = new THREE.Group();
+  const fromGltf = make('FromGltf'), fromFbx = make('FromFbx');
+  const wrap = new THREE.Group(); wrap.add(fromGltf); markTopLeftUVs(wrap);
+  g.add(wrap, fromFbx);
+  const bytes = await exportFBX(g);
+  const objects = parseFBXBinary(bytes).nodes.find((x) => x.name === 'Objects');
+  const uvOf = (name) => {
+    const geo = objects.children.find((c) => c.name === 'Geometry' && String(c.props[1]).startsWith(name));
+    const p = geo.children.find((c) => c.name === 'LayerElementUV').children.find((c) => c.name === 'UV').props[0];
+    const raw = new Uint8Array(p.encoding ? unzlibSync(p.bytes) : p.bytes);
+    return new Float64Array(raw.buffer, raw.byteOffset, p.length);
+  };
+  assert.ok(Math.abs(uvOf('FromGltf')[1] - 0.9) < 1e-6, 'glTF v flipped to 1 - v');
+  assert.ok(Math.abs(uvOf('FromFbx')[1] - 0.1) < 1e-6, 'bottom-left UVs unchanged');
+  // DAE uses the same convention
+  const { exportCollada } = await import('../src/formats/colladaExporter.js');
+  const { dae } = await exportCollada(g);
+  const uvArrays = [...dae.matchAll(/<float_array id="([^"]+)-uvs-array" count="\d+">([^<]+)</g)].map((m) => [m[1], m[2].split(' ').map(Number)]);
+  assert.equal(uvArrays.find(([id]) => id.startsWith('FromGltf'))[1][1], 0.9);
+  assert.equal(uvArrays.find(([id]) => id.startsWith('FromFbx'))[1][1], 0.1);
+});

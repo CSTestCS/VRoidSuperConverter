@@ -10,6 +10,7 @@ import { VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
 import { detectHumanoid } from '../core/humanoid.js';
 import { HUMANOID_FROM_VROID } from '../core/vroidSkeleton.js';
 import { skinnedMeshesOf, meshesOf } from '../core/skinning.js';
+import { markTopLeftUVs } from '../core/uv.js';
 
 export const MODEL_EXTENSIONS = ['vrm', 'glb', 'gltf', 'fbx', 'obj', 'dae', 'bvh', 'vrma'];
 export const AUDIO_EXTENSIONS = ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'webm'];
@@ -55,6 +56,7 @@ export async function loadModelFile(name, bytes, siblings = null) {
         VRMUtils.rotateVRM0(vrm);
         VRMUtils.combineSkeletons?.(root);
       }
+      markTopLeftUVs(root); // glTF UV origin is top-left
       const ext2 = gltf.parser.json.extensions?.VRMC_vrm_animation;
       if (ext2?.humanoid?.humanBones) {
         vrmaHumanoid = {};

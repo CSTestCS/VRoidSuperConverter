@@ -1,6 +1,7 @@
 // COLLADA 1.4.1 (.dae) writer: meshes with multiple materials, diffuse textures (written as
 // separate image files), skeleton, skin controllers and sampled skeletal animation.
 import * as THREE from 'three';
+import { bottomLeftV } from '../core/uv.js';
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const ident = (s, used) => {
@@ -101,10 +102,11 @@ export async function exportCollada(root, opts = {}) {
     const pos = geo.attributes.position, nor = geo.attributes.normal, uv = geo.attributes.uv;
     const v = new THREE.Vector3();
     const P = [], N = [], T = [];
+    const fixV = bottomLeftV(mesh); // COLLADA UVs have a bottom-left origin
     for (let i = 0; i < pos.count; i++) {
       v.fromBufferAttribute(pos, i).applyMatrix4(M); P.push(num(v.x), num(v.y), num(v.z));
       if (nor) { v.fromBufferAttribute(nor, i).applyMatrix3(nm).normalize(); N.push(num(v.x), num(v.y), num(v.z)); }
-      if (uv) T.push(num(uv.getX(i)), num(uv.getY(i)));
+      if (uv) T.push(num(uv.getX(i)), num(fixV(uv.getY(i))));
     }
     const index = geo.index ? geo.index.array : Uint32Array.from({ length: pos.count }, (_, i) => i);
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];

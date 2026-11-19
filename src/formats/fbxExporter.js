@@ -3,6 +3,7 @@
 // animation. Output loads in Blender, Unity, Unreal and Autodesk tools.
 import * as THREE from 'three';
 import { zlibSync } from 'fflate';
+import { bottomLeftV } from '../core/uv.js';
 
 const enc = new TextEncoder();
 const KTIME = 46186158000n;
@@ -257,7 +258,8 @@ export async function exportFBX(root, opts = {}) {
     }
     if (uv) {
       const uvs = new Float64Array(uv.count * 2);
-      for (let i = 0; i < uv.count; i++) { uvs[i * 2] = uv.getX(i); uvs[i * 2 + 1] = uv.getY(i); }
+      const fixV = bottomLeftV(mesh); // FBX UVs have a bottom-left origin
+      for (let i = 0; i < uv.count; i++) { uvs[i * 2] = uv.getX(i); uvs[i * 2 + 1] = fixV(uv.getY(i)); }
       geoChildren.push(new N('LayerElementUV', [I(0)], [new N('Version', [I(101)]), new N('Name', [S('UVMap')]),
         new N('MappingInformationType', [S('ByPolygonVertex')]), new N('ReferenceInformationType', [S('IndexToDirect')]),
         new N('UV', [Ad(uvs)]), new N('UVIndex', [Ai(idx)])]));

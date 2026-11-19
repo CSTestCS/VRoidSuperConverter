@@ -104,6 +104,7 @@ export function weldGeometry(geo, opts = {}) {
     out.morphAttributes[name] = list.map((m) => { const a = average(m, 'avg'); a.name = m.name; return a; });
   }
   out.morphTargetsRelative = geo.morphTargetsRelative;
+  out.userData = { ...geo.userData };
   out.setIndex(newIndex);
   for (const g of newGroups) if (geo.groups.length) out.addGroup(g.start, g.count, g.materialIndex);
   out.computeBoundingBox();
